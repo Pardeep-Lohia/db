@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const Order = require('../models/Order');
 
-// Allowed status transitions
+// ===============================
+// Allowed Status Transitions
+// ===============================
 const allowedTransitions = {
   pending: ['shipped', 'cancelled'],
   shipped: ['delivered'],
@@ -37,8 +39,8 @@ router.post('/orders', async (req, res) => {
       });
     }
 
-    // Validate quantity if provided
-    if (quantity && quantity < 1) {
+    // Validate quantity
+    if (quantity !== undefined && quantity < 1) {
       return res.status(400).json({
         success: false,
         message: "Quantity must be at least 1",
@@ -46,23 +48,8 @@ router.post('/orders', async (req, res) => {
       });
     }
 
-    // 🔹 Auto-generate orderId
-    const generateOrderId = () => {
-      const random = Math.floor(1000 + Math.random() * 9000);
-      return `ORD${Date.now()}${random}`;
-    };
-
-    let orderId;
-    let exists = true;
-
-    while (exists) {
-      orderId = generateOrderId();
-      const existingOrder = await Order.findOne({ orderId });
-      if (!existingOrder) exists = false;
-    }
-
+    // ✅ Let schema auto-generate orderId (UUID)
     const newOrder = new Order({
-      orderId,
       customerName,
       phone,
       product,
@@ -158,7 +145,8 @@ router.put('/orders/:orderId', async (req, res) => {
     if (customerName) order.customerName = customerName;
     if (phone) order.phone = phone;
     if (product) order.product = product;
-    if (quantity) {
+
+    if (quantity !== undefined) {
       if (quantity < 1) {
         return res.status(400).json({
           success: false,

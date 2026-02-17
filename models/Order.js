@@ -1,12 +1,13 @@
 const mongoose = require('mongoose');
+const { v4: uuidv4 } = require('uuid');
 
 // Order Schema
 const orderSchema = new mongoose.Schema({
   orderId: {
     type: String,
-    required: true,
     unique: true,
-    index: true
+    index: true,
+    default: uuidv4   // 🔥 Auto-generate UUID
   },
 
   customerName: {
@@ -38,14 +39,10 @@ const orderSchema = new mongoose.Schema({
     type: String,
     enum: ['pending', 'shipped', 'delivered', 'cancelled'],
     default: 'pending'
-  },
-
-  createdAt: {
-    type: Date,
-    default: Date.now
   }
 
 }, {
+  timestamps: true,   // 🔥 Better than manual createdAt
   versionKey: false
 });
 
