@@ -18,34 +18,41 @@ router.get('/health', (req, res) => {
 // ===============================
 router.post('/orders', async (req, res) => {
   try {
-    const { orderId, customerName, phone, product, status } = req.body;
+    const { customerName, phone, product } = req.body;
 
     // Validate required fields
-    if (!orderId || !customerName || !phone || !product) {
+    if (!customerName || !phone || !product) {
       return res.status(400).json({
         success: false,
-        message: "Missing required fields: orderId, customerName, phone, product",
+        message: "Missing required fields: customerName, phone, product",
         data: {}
       });
     }
 
-    // Check if order already exists
-    const existingOrder = await Order.findOne({ orderId });
-    if (existingOrder) {
-      return res.status(400).json({
-        success: false,
-        message: "Order with this orderId already exists",
-        data: {}
-      });
+    // 🔹 Auto-generate orderId
+    const generateOrderId = () => {
+      const random = Math.floor(1000 + Math.random() * 9000);
+      return `ORD${Date.now()}${random}`;
+    };
+
+    let orderId;
+    let exists = true;
+
+    // Ensure unique orderId
+    while (exists) {
+      orderId = generateOrderId();
+      const existingOrder = await Order.findOne({ orderId });
+      if (!existingOrder) exists = false;
     }
 
-    // Create new order
+    // 🔹 Create new order
     const newOrder = new Order({
       orderId,
       customerName,
       phone,
       product,
-      status: status || 'pending'
+      status: "placed", // default status
+      createdAt: new Date()
     });
 
     const savedOrder = await newOrder.save();
@@ -64,6 +71,7 @@ router.post('/orders', async (req, res) => {
     });
   }
 });
+
 
 // ===============================
 // GET /orders/:orderId
