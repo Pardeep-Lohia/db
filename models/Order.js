@@ -1,13 +1,12 @@
 const mongoose = require('mongoose');
-const { v4: uuidv4 } = require('uuid');
+const Counter = require('./Counter');
 
 // Order Schema
 const orderSchema = new mongoose.Schema({
   orderId: {
     type: String,
     unique: true,
-    index: true,
-    default: uuidv4   // 🔥 Auto-generate UUID
+    index: true
   },
 
   customerName: {
@@ -42,8 +41,23 @@ const orderSchema = new mongoose.Schema({
   }
 
 }, {
-  timestamps: true,   // 🔥 Better than manual createdAt
+  timestamps: true,
   versionKey: false
+});
+
+
+// 🔥 Auto-generate readable Order ID before saving
+orderSchema.pre('save', async function (next) {
+  if (!this.orderId) {
+    const counter = await Counter.findOneAndUpdate(
+      { id: 'orderId' },
+      { $inc: { seq: 1 } },
+      { new: true, upsert: true }
+    );
+
+    this.orderId = `ORD-${counter.seq}`;
+  }
+  next();
 });
 
 module.exports = mongoose.model('Order', orderSchema);

@@ -23,23 +23,23 @@ router.get('/health', (req, res) => {
   });
 });
 
+
 // ===============================
-// POST /orders
+// POST /orders  (Create Order)
 // ===============================
 router.post('/orders', async (req, res) => {
   try {
     const { customerName, phone, product, quantity } = req.body;
 
-    // Validate required fields
+    // Basic validation
     if (!customerName || !phone || !product) {
       return res.status(400).json({
         success: false,
-        message: "Missing required fields: customerName, phone, product",
+        message: "customerName, phone, and product are required",
         data: {}
       });
     }
 
-    // Validate quantity
     if (quantity !== undefined && quantity < 1) {
       return res.status(400).json({
         success: false,
@@ -48,11 +48,11 @@ router.post('/orders', async (req, res) => {
       });
     }
 
-    // ✅ Let schema auto-generate orderId (UUID)
+    // Schema auto-generates orderId (ORD-1001 format)
     const newOrder = new Order({
-      customerName,
-      phone,
-      product,
+      customerName: customerName.trim(),
+      phone: phone.trim(),
+      product: product.trim(),
       quantity: quantity || 1,
       status: "pending"
     });
@@ -73,6 +73,44 @@ router.post('/orders', async (req, res) => {
     });
   }
 });
+
+
+// ===============================
+// GET /orders (Get All Orders with Pagination)
+// ===============================
+router.get('/orders', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+
+    const skip = (page - 1) * limit;
+
+    const total = await Order.countDocuments();
+    const orders = await Order.find()
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    res.json({
+      success: true,
+      message: "Orders retrieved successfully",
+      data: {
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+        orders
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      data: {}
+    });
+  }
+});
+
 
 // ===============================
 // GET /orders/:orderId
@@ -106,6 +144,7 @@ router.get('/orders/:orderId', async (req, res) => {
   }
 });
 
+
 // ===============================
 // PUT /orders/:orderId
 // ===============================
@@ -125,12 +164,13 @@ router.put('/orders/:orderId', async (req, res) => {
     }
 
     // ===============================
-    // SAFE STATUS TRANSITIONS
+    // SAFE STATUS TRANSITION
     // ===============================
     if (status) {
       const currentStatus = order.status;
 
-      if (!allowedTransitions[currentStatus].includes(status)) {
+      if (!allowedTransitions[currentStatus] ||
+          !allowedTransitions[currentStatus].includes(status)) {
         return res.status(400).json({
           success: false,
           message: `Cannot change status from ${currentStatus} to ${status}`,
@@ -142,9 +182,9 @@ router.put('/orders/:orderId', async (req, res) => {
     }
 
     // Optional updates
-    if (customerName) order.customerName = customerName;
-    if (phone) order.phone = phone;
-    if (product) order.product = product;
+    if (customerName) order.customerName = customerName.trim();
+    if (phone) order.phone = phone.trim();
+    if (product) order.product = product.trim();
 
     if (quantity !== undefined) {
       if (quantity < 1) {
@@ -173,6 +213,7 @@ router.put('/orders/:orderId', async (req, res) => {
     });
   }
 });
+
 
 // ===============================
 // DELETE /orders/:orderId
