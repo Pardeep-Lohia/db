@@ -1,249 +1,383 @@
 const express = require('express');
 const router = express.Router();
 const Order = require('../models/Order');
+const { validateCreateOrder, validateUpdateOrder, validateCancelOrder } = require('../middleware/validationMiddleware');
 
 // ===============================
-// Allowed Status Transitions
+// Allowed Status Transitions (Business Rules)
 // ===============================
-const allowedTransitions = {
-  pending: ['shipped', 'cancelled'],
-  shipped: ['delivered'],
-  delivered: [],
-  cancelled: []
+const ALLOWED_TRANSITIONS = {
+  pending: ['processing', 'cancelled'],
+  processing: ['shipped', 'cancelled'],
+  shipped: ['delivered', 'cancelled'],
+  delivered: [],   // Terminal state
+  cancelled: []    // Terminal state - cannot be changed
 };
 
 // ===============================
-// GET /health
+// Validation Helper
 // ===============================
-router.get('/health', (req, res) => {
-  res.json({
-    success: true,
-    message: "API is running",
-    data: {}
-  });
+const validateStatusTransition = (currentStatus, newStatus) => {
+  const allowed = ALLOWED_TRANSITIONS[currentStatus] || [];
+  if (!allowed.includes(newStatus)) {
+    return { 
+      valid: false, 
+      message: `Cannot transition from '${currentStatus}' to '${newStatus}'` 
+    };
+  }
+  return { valid: true };
+};
+
+// ===============================
+// GET /orders - Get All Orders with Pagination
+// ===============================
+router.get('/', async (req, res, next) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+    const status = req.query.status;
+    const sortBy = req.query.sortBy || 'createdAt';
+    const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+
+    const filter = { isDeleted: false };
+    if (status && ['pending', 'processing', 'shipped', 'delivered', 'cancelled'].includes(status)) {
+      filter.status = status;
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [total, orders] = await Promise.all([
+      Order.countDocuments(filter),
+      Order.find(filter)
+        .sort({ [sortBy]: sortOrder })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
+
+    res.json({
+      success: true,
+      message: 'Orders retrieved successfully',
+      data: {
+        total,
+        page,
+        totalPages: Math.ceil(total / limit),
+        limit,
+        orders
+      }
+    });
+
+  } catch (error) {
+    next(error);
+  }
 });
 
-
 // ===============================
-// POST /orders  (Create Order)
+// GET /orders/:orderId - Get Single Order
 // ===============================
-router.post('/orders', async (req, res) => {
+router.get('/:orderId', async (req, res, next) => {
   try {
-    const { customerName, phone, product, quantity } = req.body;
+    const { orderId } = req.params;
 
-    // Basic validation
-    if (!customerName || !phone || !product) {
+    if (!orderId || orderId.length < 3) {
       return res.status(400).json({
         success: false,
-        message: "customerName, phone, and product are required",
+        message: 'Invalid order ID format',
         data: {}
       });
     }
 
-    if (quantity !== undefined && quantity < 1) {
-      return res.status(400).json({
+    const order = await Order.findOne({ orderId, isDeleted: false }).lean();
+
+    if (!order) {
+      return res.status(404).json({
         success: false,
-        message: "Quantity must be at least 1",
+        message: 'Order not found',
         data: {}
       });
     }
 
-    // Schema auto-generates orderId (ORD-1001 format)
+    res.json({
+      success: true,
+      message: 'Order retrieved successfully',
+      data: order
+    });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===============================
+// POST /orders - Create New Order
+// ===============================
+router.post('/', validateCreateOrder, async (req, res, next) => {
+  try {
+    const { customerName, phone, product, quantity, notes } = req.validatedData;
+
     const newOrder = new Order({
       customerName: customerName.trim(),
       phone: phone.trim(),
       product: product.trim(),
       quantity: quantity || 1,
-      status: "pending"
+      status: 'pending',
+      notes: notes?.trim()
     });
 
     const savedOrder = await newOrder.save();
 
     res.status(201).json({
       success: true,
-      message: "Order created successfully",
-      data: savedOrder
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      data: {}
-    });
-  }
-});
-
-
-// ===============================
-// GET /orders (Get All Orders with Pagination)
-// ===============================
-router.get('/orders', async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-
-    const skip = (page - 1) * limit;
-
-    const total = await Order.countDocuments();
-    const orders = await Order.find()
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-
-    res.json({
-      success: true,
-      message: "Orders retrieved successfully",
+      message: 'Order created successfully',
       data: {
-        total,
-        page,
-        totalPages: Math.ceil(total / limit),
-        orders
+        orderId: savedOrder.orderId,
+        customerName: savedOrder.customerName,
+        phone: savedOrder.phone,
+        product: savedOrder.product,
+        quantity: savedOrder.quantity,
+        status: savedOrder.status,
+        createdAt: savedOrder.createdAt,
+        updatedAt: savedOrder.updatedAt
       }
     });
 
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      data: {}
-    });
+    // Handle duplicate orderId
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'Order creation failed. Please try again.',
+        data: {}
+      });
+    }
+    next(error);
   }
 });
 
-
 // ===============================
-// GET /orders/:orderId
+// PATCH /orders/:orderId - Update Order (Partial Update)
 // ===============================
-router.get('/orders/:orderId', async (req, res) => {
+router.patch('/:orderId', async (req, res, next) => {
   try {
     const { orderId } = req.params;
+    const { status, customerName, phone, product, quantity, notes, cancellationReason } = req.body;
 
-    const order = await Order.findOne({ orderId });
+    const order = await Order.findOne({ orderId, isDeleted: false });
 
     if (!order) {
       return res.status(404).json({
         success: false,
-        message: "Order not found",
+        message: 'Order not found',
         data: {}
       });
     }
 
-    res.json({
-      success: true,
-      message: "Order retrieved successfully",
-      data: order
-    });
-
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      data: {}
-    });
-  }
-});
-
-
-// ===============================
-// PUT /orders/:orderId
-// ===============================
-router.put('/orders/:orderId', async (req, res) => {
-  try {
-    const { orderId } = req.params;
-    const { status, customerName, phone, product, quantity } = req.body;
-
-    const order = await Order.findOne({ orderId });
-
-    if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found",
-        data: {}
-      });
-    }
-
-    // ===============================
-    // SAFE STATUS TRANSITION
-    // ===============================
+    // Status transition validation
     if (status) {
-      const currentStatus = order.status;
-
-      if (!allowedTransitions[currentStatus] ||
-          !allowedTransitions[currentStatus].includes(status)) {
+      const transition = validateStatusTransition(order.status, status);
+      if (!transition.valid) {
         return res.status(400).json({
           success: false,
-          message: `Cannot change status from ${currentStatus} to ${status}`,
-          data: {}
+          message: transition.message,
+          data: {
+            currentStatus: order.status,
+            attemptedStatus: status,
+            allowedTransitions: ALLOWED_TRANSITIONS[order.status]
+          }
         });
+      }
+
+      // Handle cancellation
+      if (status === 'cancelled') {
+        order.cancelledAt = new Date();
+        order.cancellationReason = cancellationReason?.trim() || 'Cancelled by user';
+      } else {
+        order.cancelledAt = null;
+        order.cancellationReason = null;
       }
 
       order.status = status;
     }
 
-    // Optional updates
-    if (customerName) order.customerName = customerName.trim();
-    if (phone) order.phone = phone.trim();
-    if (product) order.product = product.trim();
-
-    if (quantity !== undefined) {
-      if (quantity < 1) {
-        return res.status(400).json({
-          success: false,
-          message: "Quantity must be at least 1",
-          data: {}
-        });
-      }
-      order.quantity = quantity;
-    }
+    // Field updates
+    if (customerName !== undefined) order.customerName = customerName.trim();
+    if (phone !== undefined) order.phone = phone.trim();
+    if (product !== undefined) order.product = product.trim();
+    if (quantity !== undefined) order.quantity = quantity;
+    if (notes !== undefined) order.notes = notes?.trim();
 
     const updatedOrder = await order.save();
 
     res.json({
       success: true,
-      message: "Order updated successfully",
+      message: 'Order updated successfully',
       data: updatedOrder
     });
 
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      data: {}
-    });
+    next(error);
   }
 });
 
-
 // ===============================
-// DELETE /orders/:orderId
+// POST /orders/:orderId/cancel - Cancel Order (Proper Cancellation)
 // ===============================
-router.delete('/orders/:orderId', async (req, res) => {
+router.post('/:orderId/cancel', async (req, res, next) => {
   try {
     const { orderId } = req.params;
+    const { reason } = req.body;
 
-    const order = await Order.findOneAndDelete({ orderId });
+    const order = await Order.findOne({ orderId, isDeleted: false });
 
     if (!order) {
       return res.status(404).json({
         success: false,
-        message: "Order not found",
+        message: 'Order not found',
         data: {}
       });
     }
 
+    // Check if already cancelled
+    if (order.status === 'cancelled') {
+      return res.status(400).json({
+        success: false,
+        message: 'Order is already cancelled',
+        data: {
+          orderId: order.orderId,
+          cancelledAt: order.cancelledAt,
+          cancellationReason: order.cancellationReason
+        }
+      });
+    }
+
+    // Check if delivered (cannot cancel delivered orders)
+    if (order.status === 'delivered') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot cancel a delivered order',
+        data: {}
+      });
+    }
+
+    // Perform cancellation
+    order.status = 'cancelled';
+    order.cancelledAt = new Date();
+    order.cancellationReason = reason?.trim() || 'Cancelled by customer';
+
+    await order.save();
+
     res.json({
       success: true,
-      message: "Order deleted successfully",
-      data: {}
+      message: 'Order cancelled successfully',
+      data: {
+        orderId: order.orderId,
+        status: order.status,
+        cancelledAt: order.cancelledAt,
+        cancellationReason: order.cancellationReason
+      }
     });
 
   } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: error.message,
-      data: {}
+    next(error);
+  }
+});
+
+// ===============================
+// PUT /orders/:orderId - Full Update (Replace Order)
+// ===============================
+router.put('/:orderId', async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const { customerName, phone, product, quantity, status, notes } = req.body;
+
+    const order = await Order.findOne({ orderId, isDeleted: false });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found',
+        data: {}
+      });
+    }
+
+    // Status transition validation for PUT
+    if (status && status !== order.status) {
+      const transition = validateStatusTransition(order.status, status);
+      if (!transition.valid) {
+        return res.status(400).json({
+          success: false,
+          message: transition.message,
+          data: {
+            currentStatus: order.status,
+            attemptedStatus: status,
+            allowedTransitions: ALLOWED_TRANSITIONS[order.status]
+          }
+        });
+      }
+
+      // Handle cancellation
+      if (status === 'cancelled') {
+        order.cancelledAt = new Date();
+        order.cancellationReason = 'Cancelled during update';
+      } else {
+        order.cancelledAt = null;
+        order.cancellationReason = null;
+      }
+    }
+
+    // Update all fields
+    order.customerName = customerName?.trim() || order.customerName;
+    order.phone = phone?.trim() || order.phone;
+    order.product = product?.trim() || order.product;
+    order.quantity = quantity || order.quantity;
+    if (status) order.status = status;
+    order.notes = notes?.trim() || order.notes;
+
+    const updatedOrder = await order.save();
+
+    res.json({
+      success: true,
+      message: 'Order updated successfully',
+      data: updatedOrder
     });
+
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ===============================
+// DELETE /orders/:orderId - Soft Delete
+// ===============================
+router.delete('/:orderId', async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findOne({ orderId, isDeleted: false });
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found',
+        data: {}
+      });
+    }
+
+    // Perform soft delete
+    order.isDeleted = true;
+    await order.save();
+
+    res.json({
+      success: true,
+      message: 'Order deleted successfully',
+      data: {
+        orderId: order.orderId,
+        isDeleted: order.isDeleted
+      }
+    });
+
+  } catch (error) {
+    next(error);
   }
 });
 
